@@ -7,3 +7,4 @@ readability-lxml
 textstat
 lxml
 html5lib
+pandas
