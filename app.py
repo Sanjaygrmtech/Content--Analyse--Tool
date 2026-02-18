@@ -7,15 +7,14 @@ import streamlit as st
 
 from analyzer_ai import configure_gemini, run_ai_analysis
 from analyzer_rules import compare_rule_analysis, run_rule_analysis
+from scorer import calculate_score
 from scraper import parse_pasted_content, scrape_url
 
 
 st.set_page_config(page_title="Content Quality Analyzer", layout="wide")
 
 st.title("Content Quality Analyzer")
-st.subheader(
-    "Phase 1 + Rule + AI Analysis: benchmark your article vs competitors for SEO structure, readability, gaps, and optimization priorities."
-)
+st.subheader("Final Dashboard: Scrape, benchmark, score, and prioritize SEO improvements.")
 
 with st.sidebar:
     st.header("Inputs")
@@ -26,12 +25,27 @@ with st.sidebar:
 st.caption(f"Primary keyword for context: **{primary_keyword or 'Not provided'}**")
 
 
-def _status_chip(ok: bool, good_text: str = "Good", bad_text: str = "Issue"):
-    st.markdown(f":green[{good_text}]" if ok else f":red[{bad_text}]")
+def _color_for_score(score: int) -> str:
+    if score < 60:
+        return "#dc2626"
+    if score < 70:
+        return "#f59e0b"
+    if score < 80:
+        return "#eab308"
+    if score < 90:
+        return "#22c55e"
+    return "#166534"
 
 
-def _warning_chip(flag: bool, warn_text: str, ok_text: str = "Looks good"):
-    st.markdown(f":orange[{warn_text}]" if flag else f":green[{ok_text}]")
+def _summary_for_rating(rating: str) -> str:
+    mapping = {
+        "Excellent": "Minimal improvements needed — focus on maintaining quality and fine-tuning opportunities.",
+        "Very Good": "A few strategic optimizations can elevate this content to top-tier performance.",
+        "Good": "Solid foundation, but meaningful gaps remain compared to stronger competitors.",
+        "Fair": "Significant improvements are needed across multiple SEO and content quality areas.",
+        "Poor": "Major rework is recommended before expecting strong search performance.",
+    }
+    return mapping.get(rating, "Review the category breakdown to identify highest-impact improvements.")
 
 
 def _show_extraction_block(label: str, result: dict[str, Any]):
@@ -40,320 +54,250 @@ def _show_extraction_block(label: str, result: dict[str, Any]):
         return
 
     st.success(f"{label}: Content extracted successfully")
-    with st.expander(f"{label} — Raw extraction debug", expanded=False):
-        st.write(f"**Word count:** {result.get('word_count', 0)}")
-        st.write("**Heading hierarchy:**")
-        st.json(result.get("heading_hierarchy", []))
-        st.write("**Link counts:**")
+    st.write(f"Word count: {result.get('word_count', 0)}")
+    st.write(
+        {
+            "internal_link_count": result.get("internal_link_count", 0),
+            "external_link_count": result.get("external_link_count", 0),
+            "gov_edu_count": result.get("gov_edu_count", 0),
+        }
+    )
+
+
+def _show_hero(score_data: dict[str, Any]):
+    total = int(score_data.get("total_score", 0))
+    rating = score_data.get("rating", "Unknown")
+    color = _color_for_score(total)
+    summary = _summary_for_rating(rating)
+
+    st.markdown(
+        f"""
+        <div style="padding: 1rem 1.25rem; border-radius: 0.75rem; border: 1px solid #e5e7eb; background: #fafafa;">
+          <div style="font-size: 0.95rem; color: #6b7280;">Overall Content Score</div>
+          <div style="display:flex; align-items:end; gap:1rem;">
+            <div style="font-size: 3rem; font-weight: 700; color: {color}; line-height:1;">{total}</div>
+            <div style="font-size: 1.15rem; font-weight: 600; color: {color}; margin-bottom:0.3rem;">{rating}</div>
+          </div>
+          <div style="margin-top:0.6rem; color:#374151;">{summary}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _show_score_breakdown(score_data: dict[str, Any]):
+    st.markdown("### Score Breakdown")
+    for cat, values in score_data.get("category_scores", {}).items():
+        score = float(values.get("score", 0))
+        max_score = float(values.get("max", 1))
+        ratio = score / max_score if max_score else 0
+        label = cat.replace("_", " ").title()
+        st.write(f"**{label}** — {int(score)}/{int(max_score)}")
+        st.progress(min(max(ratio, 0.0), 1.0))
+
+
+def _show_action_items(score_data: dict[str, Any]):
+    st.markdown("### Top 3 Action Items")
+    improvements = score_data.get("top_improvements", [])[:3]
+    if not improvements:
+        st.success("No critical issues detected from current scoring rules.")
+        return
+    for idx, item in enumerate(improvements, start=1):
+        st.markdown(f"{idx}. :red[{item}]")
+
+
+def _safe_df_rows(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+def _render_tabs(
+    rule: dict[str, Any],
+    ai: dict[str, Any],
+    comparison: dict[str, Any],
+    competitor_table: pd.DataFrame,
+):
+    tabs = st.tabs([
+        "Keyword Analysis",
+        "Content Structure",
+        "Readability",
+        "Links & Sources",
+        "AI Insights",
+        "Competitor Comparison",
+    ])
+
+    keyword = rule.get("keyword_analysis", {})
+    structure = rule.get("content_structure", {})
+    readability = rule.get("readability", {})
+    links = rule.get("links", {})
+    meta = rule.get("meta", {})
+
+    with tabs[0]:
+        st.json(keyword)
+        if ai and not ai.get("error"):
+            gaps = ai.get("keyword_gap_analysis", {})
+            st.markdown("#### AI Semantic Keyword Gaps")
+            st.write("Missing topics:")
+            for item in gaps.get("missing_topics", []) or []:
+                st.markdown(f"- {item}")
+            st.write("Missing keywords:")
+            for item in gaps.get("missing_keywords", []) or []:
+                st.markdown(f"- {item}")
+
+    with tabs[1]:
+        st.json(structure)
+        if ai and not ai.get("error"):
+            hq = ai.get("heading_quality", {})
+            st.markdown("#### AI Heading Suggestions")
+            st.write(f"Overall rating: {hq.get('overall_rating', 'N/A')}")
+            improv = hq.get("suggested_improvements", []) or []
+            if improv:
+                st.dataframe(_safe_df_rows(improv), use_container_width=True)
+
+    with tabs[2]:
+        st.json(readability)
+        st.write("Meta lengths:")
         st.write(
             {
-                "internal_link_count": result.get("internal_link_count", 0),
-                "external_link_count": result.get("external_link_count", 0),
-                "gov_edu_count": result.get("gov_edu_count", 0),
+                "title_length": meta.get("title_length", 0),
+                "title_length_ok": meta.get("title_length_ok", False),
+                "meta_description_length": meta.get("meta_description_length", 0),
+                "meta_description_length_ok": meta.get("meta_description_length_ok", False),
             }
         )
-        st.write("**.gov/.edu sources found:**")
-        st.json(result.get("gov_edu_sources", []))
-        if result.get("note"):
-            st.info(result["note"])
 
+    with tabs[3]:
+        st.json(links)
 
-def _show_rule_analysis(label: str, analysis: dict[str, Any]):
-    st.markdown(f"## {label} — Rule-Based Analysis")
-    if analysis.get("error"):
-        st.error(f"{label}: {analysis['error']}")
-        return
-
-    keyword = analysis.get("keyword_analysis", {})
-    structure = analysis.get("content_structure", {})
-    readability = analysis.get("readability", {})
-    links = analysis.get("links", {})
-    images = analysis.get("images", {})
-    meta = analysis.get("meta", {})
-
-    with st.expander("Keyword Analysis", expanded=False):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.metric("Keyword in Title", "Yes" if keyword.get("keyword_in_title") else "No")
-            _status_chip(bool(keyword.get("keyword_in_title")), "Present", "Missing")
-        with c2:
-            st.metric("Keyword in Meta", "Yes" if keyword.get("keyword_in_meta") else "No")
-            _status_chip(bool(keyword.get("keyword_in_meta")), "Present", "Missing")
-        with c3:
-            st.metric("Keyword in H1", "Yes" if keyword.get("keyword_in_h1") else "No")
-            _status_chip(bool(keyword.get("keyword_in_h1")), "Present", "Missing")
-
-        c4, c5, c6 = st.columns(3)
-        c4.metric("H2s with Keyword", keyword.get("keyword_in_h2s", 0))
-        c5.metric("Keyword Density (%)", keyword.get("keyword_density", 0.0))
-        c6.metric("Keyword in First 100 Words", "Yes" if keyword.get("keyword_in_first_100_words") else "No")
-
-    with st.expander("Content Structure", expanded=False):
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Single H1", "Yes" if structure.get("has_single_h1") else "No")
-        _status_chip(bool(structure.get("has_single_h1")), "Good", "Issue")
-        c2.metric("Hierarchy Valid", "Yes" if structure.get("heading_hierarchy_valid") else "No")
-        _status_chip(bool(structure.get("heading_hierarchy_valid")), "Good", "Issue")
-        c3.metric("H2 Count", structure.get("h2_count", 0))
-        c4.metric("H3 Count", structure.get("h3_count", 0))
-
-        ratio = structure.get("heading_to_content_ratio", 0.0)
-        st.metric("Heading-to-Content Ratio Score", ratio)
-        _warning_chip(ratio < 0.8, "Add more H2 headings for long-form readability")
-
-        d1, d2, d3, d4 = st.columns(4)
-        d1.metric("Has Introduction", "Yes" if structure.get("has_introduction") else "No")
-        d2.metric("Has Conclusion", "Yes" if structure.get("has_conclusion") else "No")
-        d3.metric("Has Key Takeaways", "Yes" if structure.get("has_key_takeaways") else "No")
-        d4.metric("Has Sources Section", "Yes" if structure.get("has_sources_section") else "No")
-
-    with st.expander("Readability", expanded=False):
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Flesch Reading Ease", readability.get("flesch_reading_ease", 0.0))
-        c2.metric("Flesch-Kincaid Grade", readability.get("flesch_kincaid_grade", 0.0))
-        c3.metric("Avg Sentence Length", readability.get("avg_sentence_length", 0.0))
-        c4.metric("Avg Paragraph Length", readability.get("avg_paragraph_length", 0.0))
-        verdict = readability.get("readability_verdict", "Unknown")
-        if verdict == "Easy":
-            st.markdown(f"Verdict: :green[{verdict}]")
-        elif verdict == "Moderate":
-            st.markdown(f"Verdict: :orange[{verdict}]")
+    with tabs[4]:
+        if ai.get("error"):
+            st.info("AI analysis unavailable. Add a valid Gemini API key to unlock this tab.")
         else:
-            st.markdown(f"Verdict: :red[{verdict}]")
+            st.json(
+                {
+                    "user_intent": ai.get("user_intent", {}),
+                    "target_audience": ai.get("target_audience", {}),
+                    "geo_targeting": ai.get("geo_targeting", {}),
+                    "content_depth": ai.get("content_depth", {}),
+                    "overall_ai_assessment": ai.get("overall_ai_assessment", {}),
+                }
+            )
+            st.markdown("#### Structural Suggestions")
+            st.json(ai.get("structural_suggestions", {}))
 
-    with st.expander("Links & Sources", expanded=False):
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Internal Links", links.get("internal_link_count", 0))
-        c2.metric("External Links", links.get("external_link_count", 0))
-        c3.metric("Total Links", links.get("total_link_count", 0))
-        c4.metric("Internal:External", links.get("link_ratio", "0:0"))
-
-        c5, c6 = st.columns(2)
-        c5.metric(".gov/.edu Sources", links.get("gov_edu_source_count", 0))
-        c6.metric("Has Authority Sources", "Yes" if links.get("has_authority_sources") else "No")
-        _warning_chip(bool(links.get("overlinking_flag")), "Possible overlinking (>1 link per 100 words)")
-
-        st.write("**Authority source URLs:**")
-        st.json(links.get("gov_edu_sources_list", []))
-
-    with st.expander("Meta Tags", expanded=False):
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Title Length", meta.get("title_length", 0))
-        c2.metric("Title Length OK", "Yes" if meta.get("title_length_ok") else "No")
-        _warning_chip(not bool(meta.get("title_length_ok")), "Adjust title to 30-60 chars")
-        c3.metric("Meta Description Length", meta.get("meta_description_length", 0))
-        c4.metric("Meta Description Length OK", "Yes" if meta.get("meta_description_length_ok") else "No")
-        _warning_chip(not bool(meta.get("meta_description_length_ok")), "Adjust meta to 120-160 chars")
-
-    with st.expander("Image Analysis", expanded=False):
-        i1, i2, i3 = st.columns(3)
-        i1.metric("Image Count", images.get("image_count", 0))
-        i2.metric("Missing Alt Count", images.get("images_missing_alt_count", 0))
-        i3.metric("Missing Alt (%)", images.get("images_missing_alt_percentage", 0.0))
+    with tabs[5]:
+        if comparison.get("error"):
+            st.error(comparison.get("error"))
+        elif comparison.get("note"):
+            st.info(comparison.get("note"))
+        else:
+            st.json(comparison)
+        st.markdown("#### Side-by-side metrics")
+        if competitor_table.empty:
+            st.info("No competitor rows available.")
+        else:
+            st.dataframe(competitor_table, use_container_width=True)
 
 
-def _comparison_table(my_label: str, my_analysis: dict[str, Any], competitor_map: dict[str, dict[str, Any]]):
+def _build_comparison_table(analyses: dict[str, dict[str, Any]]) -> pd.DataFrame:
     rows = []
-
-    def _get(a: dict[str, Any], *path: str, default: Any = 0):
-        current = a
-        for p in path:
-            if not isinstance(current, dict):
-                return default
-            current = current.get(p, default)
-        return current
-
-    entries = {my_label: my_analysis, **competitor_map}
-    for name, analysis in entries.items():
+    for article, analysis in analyses.items():
         if analysis.get("error"):
             continue
         rows.append(
             {
-                "Article": name,
-                "Word Count": _get(analysis, "summary", "word_count"),
-                "H2 Count": _get(analysis, "content_structure", "h2_count"),
-                "H3 Count": _get(analysis, "content_structure", "h3_count"),
-                "Total Links": _get(analysis, "links", "total_link_count"),
-                "Flesch-Kincaid Grade": _get(analysis, "readability", "flesch_kincaid_grade"),
-                "Keyword in Title": _get(analysis, "keyword_analysis", "keyword_in_title"),
+                "Article": article,
+                "Total Score": analysis.get("score", {}).get("total_score", "-"),
+                "Rating": analysis.get("score", {}).get("rating", "-"),
+                "Word Count": analysis.get("rule", {}).get("summary", {}).get("word_count", 0),
+                "H2 Count": analysis.get("rule", {}).get("content_structure", {}).get("h2_count", 0),
+                "Total Links": analysis.get("rule", {}).get("links", {}).get("total_link_count", 0),
+                "Flesch-Kincaid": analysis.get("rule", {}).get("readability", {}).get("flesch_kincaid_grade", 0),
             }
         )
-
-    if not rows:
-        st.warning("No valid analyses to compare yet.")
-        return
-
-    st.markdown("## Comparison Table")
-    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    return pd.DataFrame(rows)
 
 
-def _render_badge(value: str, good: set[str] | None = None, warn: set[str] | None = None):
-    good = good or set()
-    warn = warn or set()
-    value = value or "unknown"
-    if value in good:
-        st.markdown(f":green[{value}]")
-    elif value in warn:
-        st.markdown(f":orange[{value}]")
-    else:
-        st.markdown(f":red[{value}]")
+def _avg_comp_word_count(analyses: dict[str, dict[str, Any]], exclude: str) -> float:
+    comp = [
+        a.get("rule", {}).get("summary", {}).get("word_count", 0)
+        for label, a in analyses.items()
+        if label != exclude and label.startswith("Competitor") and not a.get("error")
+    ]
+    return float(sum(comp) / len(comp)) if comp else 0.0
 
 
-def _show_ai_analysis(ai_result: dict[str, Any]):
-    st.markdown("## AI Analysis (Gemini)")
-    if ai_result.get("error"):
-        st.error(ai_result["error"])
-        return
-
-    intent = ai_result.get("user_intent", {})
-    audience = ai_result.get("target_audience", {})
-    geo = ai_result.get("geo_targeting", {})
-    gaps = ai_result.get("keyword_gap_analysis", {})
-    heading = ai_result.get("heading_quality", {})
-    depth = ai_result.get("content_depth", {})
-    structure = ai_result.get("structural_suggestions", {})
-    overall = ai_result.get("overall_ai_assessment", {})
-
-    with st.expander("User Intent & Audience", expanded=True):
-        c1, c2, c3 = st.columns(3)
-        c1.markdown("**Intent**")
-        _render_badge(intent.get("classification", ""), good={"informational", "commercial_investigation"}, warn={"transactional"})
-        c2.markdown("**Confidence**")
-        _render_badge(intent.get("confidence", ""), good={"high"}, warn={"medium"})
-        c3.markdown("**Audience Expertise**")
-        _render_badge(audience.get("expertise_level", ""), good={"intermediate", "advanced", "professional"}, warn={"beginner"})
-        st.write(f"Intent rationale: {intent.get('explanation', 'N/A')}")
-        st.write(f"Audience type: {audience.get('audience_type', 'N/A')}")
-        st.write(f"Audience rationale: {audience.get('explanation', 'N/A')}")
-
-    with st.expander("Geo-Targeting", expanded=False):
-        c1, c2 = st.columns(2)
-        c1.markdown("**Detected Scope**")
-        _render_badge(geo.get("scope", ""), good={"global", "us_national"}, warn={"unclear"})
-        c2.write(f"Detected region: {geo.get('detected_region')}")
-        st.write(geo.get("explanation", "No geo signals provided."))
-
-    with st.expander("Keyword Gaps", expanded=False):
-        st.markdown("**Missing semantic topics to add**")
-        for topic in gaps.get("missing_topics", []) or []:
-            st.markdown(f"- :red[{topic}]")
-        st.markdown("**Missing keyword phrases**")
-        for kw in gaps.get("missing_keywords", []) or []:
-            st.markdown(f"- :orange[{kw}]")
-        st.markdown("**Over-covered topics (potential strengths)**")
-        for topic in gaps.get("over_covered_topics", []) or []:
-            st.markdown(f"- :green[{topic}]")
-
-    with st.expander("Heading Quality", expanded=False):
-        _render_badge(heading.get("overall_rating", ""), good={"good", "excellent"}, warn={"fair"})
-        vague = heading.get("vague_headings", []) or []
-        if vague:
-            st.write("**Headings to tighten:**")
-            for item in vague:
-                st.markdown(f"- :orange[{item}]")
-
-        improvements = heading.get("suggested_improvements", []) or []
-        if improvements:
-            table = pd.DataFrame(improvements)
-            st.write("**Current vs Suggested headings**")
-            st.dataframe(table, use_container_width=True)
-
-    with st.expander("Content Depth", expanded=False):
-        c1, c2 = st.columns(2)
-        c1.write("**Depth vs competitors**")
-        _render_badge(depth.get("vs_competitors", ""), good={"deeper", "comparable"}, warn={"shallower"})
-        c2.write("**Strength areas**")
-        for item in depth.get("strengths", []) or []:
-            c2.markdown(f"- :green[{item}]")
-        st.write("**Depth gaps to close**")
-        for item in depth.get("gaps", []) or []:
-            st.markdown(f"- :red[{item}]")
-
-    with st.expander("AI Recommendations", expanded=True):
-        st.markdown("### Top 3 Priorities")
-        priorities = overall.get("top_3_priorities", []) or []
-        for idx, p in enumerate(priorities, start=1):
-            st.markdown(f"{idx}. :red[{p}]")
-
-        st.markdown("### Structural Suggestions")
-        for section_name, key in [
-            ("Missing Sections", "missing_sections"),
-            ("Reorder Suggestions", "reorder_suggestions"),
-            ("Remove Suggestions", "remove_suggestions"),
-        ]:
-            st.write(f"**{section_name}:**")
-            items = structure.get(key, []) or []
-            if not items:
-                st.markdown("- None")
-            for item in items:
-                st.markdown(f"- :orange[{item}]")
-
-        st.markdown("### Overall Assessment")
-        st.info(overall.get("summary", "No summary returned."))
-
-
-def _process_and_render(results: dict[str, dict[str, Any]], labels: list[str]):
+def _run_pipeline(extracted_results: dict[str, dict[str, Any]], labels: list[str]):
     st.markdown("### Extraction Results")
-    for label in labels:
-        _show_extraction_block(label, results[label])
+    with st.expander("Show raw extraction status", expanded=False):
+        for label in labels:
+            _show_extraction_block(label, extracted_results[label])
 
     analyses: dict[str, dict[str, Any]] = {}
     with st.spinner("Running rule-based analysis..."):
         for label in labels:
-            analyses[label] = run_rule_analysis(results[label], primary_keyword)
-
-    st.markdown("---")
-    _show_rule_analysis("Your Article", analyses.get("Your Article", {"error": "Missing analysis"}))
-
-    for label in labels:
-        if label != "Your Article":
-            _show_rule_analysis(label, analyses[label])
+            ext = extracted_results[label]
+            rule = run_rule_analysis(ext, primary_keyword)
+            analyses[label] = {"extracted": ext, "rule": rule}
 
     comparison = compare_rule_analysis(
-        analyses.get("Your Article", {"error": "Missing analysis"}),
-        [analyses[label] for label in labels if label.startswith("Competitor")],
+        analyses.get("Your Article", {}).get("rule", {"error": "Missing analysis"}),
+        [analyses[label]["rule"] for label in labels if label.startswith("Competitor")],
     )
 
-    st.markdown("---")
-    st.markdown("## Competitive Gaps")
-    if comparison.get("error"):
-        st.error(comparison["error"])
+    ai_results: dict[str, Any] = {"error": "AI analysis unavailable"}
+    if gemini_api_key.strip():
+        try:
+            configure_gemini(gemini_api_key)
+            my_content = analyses.get("Your Article", {}).get("extracted", {})
+            competitors = [analyses[label]["extracted"] for label in labels if label.startswith("Competitor") and not analyses[label]["extracted"].get("error")]
+            ai_payload = {
+                "my_rule_analysis": analyses.get("Your Article", {}).get("rule", {}),
+                "competitor_rule_analysis": {label: analyses[label]["rule"] for label in labels if label.startswith("Competitor")},
+                "comparison": comparison,
+            }
+            with st.spinner("Running AI analysis with Gemini..."):
+                ai_results = run_ai_analysis(my_content, competitors, primary_keyword, ai_payload)
+        except Exception as exc:
+            ai_results = {"error": f"Unable to run AI analysis: {exc}"}
     else:
-        weaker = comparison.get("weaker_areas", [])
-        if weaker:
-            for item in weaker:
-                st.markdown(f"- :red[{item}]")
-        elif comparison.get("note"):
-            st.info(comparison["note"])
-        else:
-            st.success("No clear weak areas detected based on available rule checks.")
+        st.info("AI analysis is optional. Add Gemini API key in sidebar for intent/gap/depth insights.")
 
-    competitor_map = {k: v for k, v in analyses.items() if k.startswith("Competitor")}
-    _comparison_table("Your Article", analyses.get("Your Article", {}), competitor_map)
+    # Score user + competitors
+    for label in labels:
+        rule = analyses[label]["rule"]
+        if rule.get("error"):
+            analyses[label]["error"] = rule.get("error")
+            analyses[label]["score"] = {"total_score": 0, "rating": "Poor", "category_scores": {}, "top_improvements": []}
+            continue
 
-    st.markdown("---")
-    if not gemini_api_key.strip():
-        st.info("AI analysis is optional. Add a Gemini API Key in the sidebar to unlock AI insights.")
-        return
+        # add fallback context for depth scoring
+        rule_with_context = dict(rule)
+        rule_with_context["comparison_context"] = {
+            "avg_competitor_word_count": _avg_comp_word_count(analyses, exclude=label)
+        }
+        ai_for_label = ai_results if label == "Your Article" else None
+        analyses[label]["score"] = calculate_score(rule_with_context, ai_for_label)
+        analyses[label]["rule"] = rule_with_context
 
-    try:
-        configure_gemini(gemini_api_key)
-    except Exception as exc:
-        st.error(f"Unable to configure Gemini: {exc}")
-        return
+    my_score = analyses.get("Your Article", {}).get("score", {"total_score": 0, "rating": "Poor", "category_scores": {}, "top_improvements": []})
+    _show_hero(my_score)
+    _show_score_breakdown(my_score)
+    _show_action_items(my_score)
 
-    my_content = results.get("Your Article", {})
-    competitor_contents = [results[label] for label in labels if label.startswith("Competitor") and not results[label].get("error")]
-    ai_payload = {
-        "my_rule_analysis": analyses.get("Your Article", {}),
-        "competitor_rule_analysis": {label: analyses[label] for label in labels if label.startswith("Competitor")},
-        "comparison": comparison,
-    }
+    competitor_table = _build_comparison_table(analyses)
 
-    with st.spinner("Running AI analysis with Gemini..."):
-        ai_result = run_ai_analysis(my_content, competitor_contents, primary_keyword, ai_payload)
+    st.markdown("### Competitor Scores")
+    if competitor_table.empty:
+        st.info("No competitor scores available.")
+    else:
+        st.dataframe(competitor_table, use_container_width=True)
 
-    _show_ai_analysis(ai_result)
+    _render_tabs(
+        analyses.get("Your Article", {}).get("rule", {}),
+        ai_results,
+        comparison,
+        competitor_table,
+    )
 
 
 if input_method == "Enter URLs":
@@ -375,13 +319,11 @@ if input_method == "Enter URLs":
                 ("Competitor 3", competitor_url_3.strip()),
             ]
             provided = [(label, url) for label, url in url_inputs if url]
-
             extracted_results: dict[str, dict[str, Any]] = {}
             with st.spinner("Scraping content..."):
                 for label, url in provided:
                     extracted_results[label] = scrape_url(url)
-
-            _process_and_render(extracted_results, [label for label, _ in provided])
+            _run_pipeline(extracted_results, [label for label, _ in provided])
 
 else:
     your_content = st.text_area(
@@ -408,10 +350,8 @@ else:
                 ("Competitor 2", competitor_content_2.strip()),
             ]
             provided = [(label, content) for label, content in content_inputs if content]
-
             extracted_results: dict[str, dict[str, Any]] = {}
             with st.spinner("Scraping content..."):
                 for label, content in provided:
                     extracted_results[label] = parse_pasted_content(content)
-
-            _process_and_render(extracted_results, [label for label, _ in provided])
+            _run_pipeline(extracted_results, [label for label, _ in provided])
