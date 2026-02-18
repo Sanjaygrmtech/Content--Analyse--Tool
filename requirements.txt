@@ -1,0 +1,9 @@
+streamlit
+beautifulsoup4
+requests
+playwright
+google-generativeai
+readability-lxml
+textstat
+lxml
+html5lib
