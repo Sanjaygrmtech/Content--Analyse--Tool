@@ -8,7 +8,7 @@ import google.generativeai as genai
 
 from prompts import build_analysis_prompt
 
-MODEL_NAME = "gemini-2.0-flash"
+MODEL_NAME = "gemini-1.5-flash"
 
 
 def configure_gemini(api_key: str):
