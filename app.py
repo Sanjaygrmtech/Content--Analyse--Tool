@@ -10,11 +10,42 @@ from analyzer_rules import compare_rule_analysis, run_rule_analysis
 from scorer import calculate_score
 from scraper import parse_pasted_content, scrape_url
 
+APP_VERSION = "v1.0.0"
 
 st.set_page_config(page_title="Content Quality Analyzer", layout="wide")
 
+
+@st.cache_data(show_spinner=False)
+def cached_scrape_url(url: str) -> dict[str, Any]:
+    return scrape_url(url)
+
+
+def _init_state() -> None:
+    defaults = {
+        "competitor_count": 1,
+        "analysis_results": None,
+        "last_inputs_hash": None,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+_init_state()
+
 st.title("Content Quality Analyzer")
 st.subheader("Final Dashboard: Scrape, benchmark, score, and prioritize SEO improvements.")
+
+with st.expander("How to Use", expanded=False):
+    st.markdown(
+        """
+1. Enter your primary keyword and choose URL mode or paste mode.
+2. Add your article + competitor content.
+3. (Optional) Add Gemini API key for deeper AI insights.
+4. Click **Analyze** to get score, action items, and competitor benchmark.
+5. Use **Download Report** to export a markdown summary.
+        """
+    )
 
 with st.sidebar:
     st.header("Inputs")
@@ -48,9 +79,10 @@ def _summary_for_rating(rating: str) -> str:
     return mapping.get(rating, "Review the category breakdown to identify highest-impact improvements.")
 
 
-def _show_extraction_block(label: str, result: dict[str, Any]):
+def _show_extraction_block(label: str, result: dict[str, Any]) -> None:
     if result.get("error"):
         st.error(f"{label}: {result['error']}")
+        st.info("Tip: If this URL blocks scraping, switch to **Paste Content** mode and paste the article text/HTML directly.")
         return
 
     st.success(f"{label}: Content extracted successfully")
@@ -63,12 +95,18 @@ def _show_extraction_block(label: str, result: dict[str, Any]):
         }
     )
 
+    if int(result.get("word_count", 0) or 0) < 200:
+        st.warning("Very short content detected (<200 words). Score may be limited due to low depth.")
+    if not result.get("h2"):
+        st.warning("No H2 tags detected. Add section headings to improve readability and structure.")
 
-def _show_hero(score_data: dict[str, Any]):
+
+def _show_hero(score_data: dict[str, Any], partial_ai: bool = False) -> None:
     total = int(score_data.get("total_score", 0))
     rating = score_data.get("rating", "Unknown")
     color = _color_for_score(total)
     summary = _summary_for_rating(rating)
+    partial_label = "<div style='margin-top:0.5rem;color:#b45309;font-weight:600;'>Partial Analysis — AI unavailable</div>" if partial_ai else ""
 
     st.markdown(
         f"""
@@ -79,13 +117,14 @@ def _show_hero(score_data: dict[str, Any]):
             <div style="font-size: 1.15rem; font-weight: 600; color: {color}; margin-bottom:0.3rem;">{rating}</div>
           </div>
           <div style="margin-top:0.6rem; color:#374151;">{summary}</div>
+          {partial_label}
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
-def _show_score_breakdown(score_data: dict[str, Any]):
+def _show_score_breakdown(score_data: dict[str, Any]) -> None:
     st.markdown("### Score Breakdown")
     for cat, values in score_data.get("category_scores", {}).items():
         score = float(values.get("score", 0))
@@ -96,7 +135,7 @@ def _show_score_breakdown(score_data: dict[str, Any]):
         st.progress(min(max(ratio, 0.0), 1.0))
 
 
-def _show_action_items(score_data: dict[str, Any]):
+def _show_action_items(score_data: dict[str, Any]) -> None:
     st.markdown("### Top 3 Action Items")
     improvements = score_data.get("top_improvements", [])[:3]
     if not improvements:
@@ -115,7 +154,7 @@ def _render_tabs(
     ai: dict[str, Any],
     comparison: dict[str, Any],
     competitor_table: pd.DataFrame,
-):
+) -> None:
     tabs = st.tabs([
         "Keyword Analysis",
         "Content Structure",
@@ -155,7 +194,6 @@ def _render_tabs(
 
     with tabs[2]:
         st.json(readability)
-        st.write("Meta lengths:")
         st.write(
             {
                 "title_length": meta.get("title_length", 0),
@@ -191,6 +229,7 @@ def _render_tabs(
             st.info(comparison.get("note"))
         else:
             st.json(comparison)
+
         st.markdown("#### Side-by-side metrics")
         if competitor_table.empty:
             st.info("No competitor rows available.")
@@ -226,43 +265,83 @@ def _avg_comp_word_count(analyses: dict[str, dict[str, Any]], exclude: str) -> f
     return float(sum(comp) / len(comp)) if comp else 0.0
 
 
-def _run_pipeline(extracted_results: dict[str, dict[str, Any]], labels: list[str]):
-    st.markdown("### Extraction Results")
-    with st.expander("Show raw extraction status", expanded=False):
-        for label in labels:
-            _show_extraction_block(label, extracted_results[label])
+def _build_report_markdown(results: dict[str, Any]) -> str:
+    score = results.get("my_score", {})
+    comparison = results.get("comparison", {})
+    ai = results.get("ai_results", {})
+    lines = [
+        "# Content Quality Analyzer Report",
+        "",
+        f"- Overall Score: **{score.get('total_score', 0)} / 100**",
+        f"- Rating: **{score.get('rating', 'Unknown')}**",
+        "",
+        "## Top Improvements",
+    ]
+    for item in score.get("top_improvements", [])[:10]:
+        lines.append(f"- {item}")
 
+    lines.extend(["", "## Category Scores"])
+    for cat, values in score.get("category_scores", {}).items():
+        lines.append(f"- {cat.replace('_', ' ').title()}: {values.get('score', 0)}/{values.get('max', 0)}")
+
+    lines.extend(["", "## Competitive Notes"])
+    if comparison.get("weaker_areas"):
+        for item in comparison["weaker_areas"]:
+            lines.append(f"- {item}")
+    elif comparison.get("note"):
+        lines.append(f"- {comparison['note']}")
+
+    lines.extend(["", "## AI Status"])
+    if ai.get("error"):
+        lines.append(f"- AI unavailable: {ai['error']}")
+    else:
+        lines.append(f"- Intent: {ai.get('user_intent', {}).get('classification', 'N/A')}")
+        lines.append(f"- Depth vs competitors: {ai.get('content_depth', {}).get('vs_competitors', 'N/A')}")
+
+    return "\n".join(lines)
+
+
+def _run_pipeline(extracted_results: dict[str, dict[str, Any]], labels: list[str], primary_keyword_value: str, gemini_key: str) -> dict[str, Any]:
     analyses: dict[str, dict[str, Any]] = {}
-    with st.spinner("Running rule-based analysis..."):
-        for label in labels:
-            ext = extracted_results[label]
-            rule = run_rule_analysis(ext, primary_keyword)
-            analyses[label] = {"extracted": ext, "rule": rule}
+    ai_results: dict[str, Any] = {"error": "AI analysis unavailable"}
+
+    progress = st.progress(0, text="Scraping...")
+
+    for label in labels:
+        ext = extracted_results[label]
+        analyses[label] = {"extracted": ext, "rule": {}}
+    progress.progress(25, text="Analyzing structure...")
+
+    for label in labels:
+        analyses[label]["rule"] = run_rule_analysis(analyses[label]["extracted"], primary_keyword_value)
 
     comparison = compare_rule_analysis(
         analyses.get("Your Article", {}).get("rule", {"error": "Missing analysis"}),
         [analyses[label]["rule"] for label in labels if label.startswith("Competitor")],
     )
 
-    ai_results: dict[str, Any] = {"error": "AI analysis unavailable"}
-    if gemini_api_key.strip():
+    progress.progress(60, text="Running AI analysis...")
+    if gemini_key.strip():
         try:
-            configure_gemini(gemini_api_key)
+            configure_gemini(gemini_key)
             my_content = analyses.get("Your Article", {}).get("extracted", {})
-            competitors = [analyses[label]["extracted"] for label in labels if label.startswith("Competitor") and not analyses[label]["extracted"].get("error")]
+            competitors = [
+                analyses[label]["extracted"]
+                for label in labels
+                if label.startswith("Competitor") and not analyses[label]["extracted"].get("error")
+            ]
             ai_payload = {
                 "my_rule_analysis": analyses.get("Your Article", {}).get("rule", {}),
                 "competitor_rule_analysis": {label: analyses[label]["rule"] for label in labels if label.startswith("Competitor")},
                 "comparison": comparison,
             }
-            with st.spinner("Running AI analysis with Gemini..."):
-                ai_results = run_ai_analysis(my_content, competitors, primary_keyword, ai_payload)
+            ai_results = run_ai_analysis(my_content, competitors, primary_keyword_value, ai_payload)
         except Exception as exc:
             ai_results = {"error": f"Unable to run AI analysis: {exc}"}
     else:
-        st.info("AI analysis is optional. Add Gemini API key in sidebar for intent/gap/depth insights.")
+        ai_results = {"error": "No Gemini API key provided."}
 
-    # Score user + competitors
+    progress.progress(85, text="Calculating score...")
     for label in labels:
         rule = analyses[label]["rule"]
         if rule.get("error"):
@@ -270,60 +349,99 @@ def _run_pipeline(extracted_results: dict[str, dict[str, Any]], labels: list[str
             analyses[label]["score"] = {"total_score": 0, "rating": "Poor", "category_scores": {}, "top_improvements": []}
             continue
 
-        # add fallback context for depth scoring
         rule_with_context = dict(rule)
-        rule_with_context["comparison_context"] = {
-            "avg_competitor_word_count": _avg_comp_word_count(analyses, exclude=label)
-        }
-        ai_for_label = ai_results if label == "Your Article" else None
+        rule_with_context["comparison_context"] = {"avg_competitor_word_count": _avg_comp_word_count(analyses, exclude=label)}
+        ai_for_label = ai_results if label == "Your Article" and not ai_results.get("error") else None
         analyses[label]["score"] = calculate_score(rule_with_context, ai_for_label)
         analyses[label]["rule"] = rule_with_context
 
-    my_score = analyses.get("Your Article", {}).get("score", {"total_score": 0, "rating": "Poor", "category_scores": {}, "top_improvements": []})
-    _show_hero(my_score)
+    progress.progress(100, text="Done")
+
+    return {
+        "labels": labels,
+        "analyses": analyses,
+        "comparison": comparison,
+        "ai_results": ai_results,
+        "my_score": analyses.get("Your Article", {}).get("score", {"total_score": 0, "rating": "Poor", "category_scores": {}, "top_improvements": []}),
+        "partial_ai": bool(ai_results.get("error")),
+    }
+
+
+def _render_results(results: dict[str, Any]) -> None:
+    labels = results["labels"]
+    analyses = results["analyses"]
+    comparison = results["comparison"]
+    ai_results = results["ai_results"]
+    my_score = results["my_score"]
+
+    st.markdown("### Extraction Results")
+    with st.expander("Show raw extraction status", expanded=False):
+        for label in labels:
+            _show_extraction_block(label, analyses[label]["extracted"])
+
+    if ai_results.get("error"):
+        st.warning("Partial Analysis — AI unavailable. Rule-based scoring is still shown.")
+        if "429" in ai_results.get("error", ""):
+            st.warning("Gemini rate limit hit (429). Please wait about 60 seconds and retry.")
+
+    _show_hero(my_score, partial_ai=bool(ai_results.get("error")))
     _show_score_breakdown(my_score)
     _show_action_items(my_score)
 
     competitor_table = _build_comparison_table(analyses)
-
     st.markdown("### Competitor Scores")
     if competitor_table.empty:
         st.info("No competitor scores available.")
     else:
         st.dataframe(competitor_table, use_container_width=True)
 
-    _render_tabs(
-        analyses.get("Your Article", {}).get("rule", {}),
-        ai_results,
-        comparison,
-        competitor_table,
+    _render_tabs(analyses.get("Your Article", {}).get("rule", {}), ai_results, comparison, competitor_table)
+
+    report_text = _build_report_markdown(results)
+    st.download_button(
+        label="Download Report",
+        data=report_text,
+        file_name="content_quality_report.md",
+        mime="text/markdown",
     )
 
 
 if input_method == "Enter URLs":
     your_url = st.text_input("Your Article URL", placeholder="https://example.com/your-article")
-    competitor_url_1 = st.text_input("Competitor URL 1", placeholder="https://competitor.com/article")
-    competitor_url_2 = st.text_input("Competitor URL 2 (optional)", placeholder="https://competitor2.com/article")
-    competitor_url_3 = st.text_input("Competitor URL 3 (optional)", placeholder="https://competitor3.com/article")
+
+    st.markdown("#### Competitor URLs")
+    competitor_urls: list[str] = []
+    for i in range(st.session_state.competitor_count):
+        val = st.text_input(
+            f"Competitor URL {i + 1}{' (required)' if i == 0 else ' (optional)'}",
+            placeholder=f"https://competitor{i+1}.com/article",
+            key=f"comp_url_{i}",
+        )
+        competitor_urls.append(val)
+
+    add_col, _ = st.columns([1, 3])
+    with add_col:
+        if st.button("Add Another Competitor", disabled=st.session_state.competitor_count >= 3):
+            st.session_state.competitor_count = min(3, st.session_state.competitor_count + 1)
+            st.rerun()
 
     if st.button("Analyze", type="primary"):
-        if not competitor_url_1.strip():
-            st.error("Competitor URL 1 is required.")
-        elif not your_url.strip():
+        if not your_url.strip():
             st.error("Your Article URL is required.")
+        elif not competitor_urls[0].strip():
+            st.error("At least Competitor URL 1 is required.")
         else:
-            url_inputs = [
-                ("Your Article", your_url.strip()),
-                ("Competitor 1", competitor_url_1.strip()),
-                ("Competitor 2", competitor_url_2.strip()),
-                ("Competitor 3", competitor_url_3.strip()),
-            ]
-            provided = [(label, url) for label, url in url_inputs if url]
+            url_inputs = [("Your Article", your_url.strip())]
+            for idx, url in enumerate(competitor_urls, start=1):
+                if url.strip():
+                    url_inputs.append((f"Competitor {idx}", url.strip()))
+
             extracted_results: dict[str, dict[str, Any]] = {}
-            with st.spinner("Scraping content..."):
-                for label, url in provided:
-                    extracted_results[label] = scrape_url(url)
-            _run_pipeline(extracted_results, [label for label, _ in provided])
+            for label, url in url_inputs:
+                extracted_results[label] = cached_scrape_url(url)
+
+            labels = [label for label, _ in url_inputs]
+            st.session_state.analysis_results = _run_pipeline(extracted_results, labels, primary_keyword, gemini_api_key)
 
 else:
     your_content = st.text_area(
@@ -332,11 +450,7 @@ else:
         placeholder="Paste your article HTML or plain text here...",
     )
     competitor_content_1 = st.text_area("Competitor Content 1", height=220, placeholder="Paste competitor content here...")
-    competitor_content_2 = st.text_area(
-        "Competitor Content 2 (optional)",
-        height=220,
-        placeholder="Paste optional second competitor content here...",
-    )
+    competitor_content_2 = st.text_area("Competitor Content 2 (optional)", height=220, placeholder="Paste optional second competitor content here...")
 
     if st.button("Analyze", type="primary"):
         if not your_content.strip():
@@ -351,7 +465,14 @@ else:
             ]
             provided = [(label, content) for label, content in content_inputs if content]
             extracted_results: dict[str, dict[str, Any]] = {}
-            with st.spinner("Scraping content..."):
-                for label, content in provided:
-                    extracted_results[label] = parse_pasted_content(content)
-            _run_pipeline(extracted_results, [label for label, _ in provided])
+            for label, content in provided:
+                extracted_results[label] = parse_pasted_content(content)
+
+            labels = [label for label, _ in provided]
+            st.session_state.analysis_results = _run_pipeline(extracted_results, labels, primary_keyword, gemini_api_key)
+
+if st.session_state.analysis_results:
+    _render_results(st.session_state.analysis_results)
+
+st.markdown("---")
+st.caption(f"Content Quality Analyzer {APP_VERSION}")

@@ -62,9 +62,17 @@ def _heading_hierarchy_valid(heading_hierarchy: list[dict[str, str]]) -> bool:
     return True
 
 
+
+
+def _safe_textstat(func, text: str, default: float = 0.0) -> float:
+    try:
+        return float(func(text))
+    except Exception:
+        return default
+
 def _estimate_avg_sentence_length(text: str) -> float:
     words = len(text.split())
-    sentences = max(textstat.sentence_count(text), 1)
+    sentences = max(int(_safe_textstat(textstat.sentence_count, text, default=1)), 1)
     return round(words / sentences, 2)
 
 
@@ -72,7 +80,7 @@ def _estimate_avg_paragraph_length(raw_text: str) -> float:
     paragraphs = [p for p in re.split(r"\n\s*\n", raw_text) if p.strip()]
     if not paragraphs:
         return 0.0
-    sentence_counts = [max(textstat.sentence_count(p), 1) for p in paragraphs]
+    sentence_counts = [max(int(_safe_textstat(textstat.sentence_count, p, default=1)), 1) for p in paragraphs]
     return round(sum(sentence_counts) / len(sentence_counts), 2)
 
 
@@ -110,8 +118,8 @@ def run_rule_analysis(extracted: dict[str, Any], keyword: str) -> dict[str, Any]
     image_count = len(extracted.get("images", []) or [])
     missing_alt = int(extracted.get("images_missing_alt", 0) or 0)
 
-    flesch_reading_ease = round(textstat.flesch_reading_ease(body_text), 2) if body_text else 0.0
-    flesch_kincaid_grade = round(textstat.flesch_kincaid_grade(body_text), 2) if body_text else 0.0
+    flesch_reading_ease = round(_safe_textstat(textstat.flesch_reading_ease, body_text, default=0.0), 2) if body_text else 0.0
+    flesch_kincaid_grade = round(_safe_textstat(textstat.flesch_kincaid_grade, body_text, default=0.0), 2) if body_text else 0.0
 
     all_headings = [h.get("text", "") for h in heading_hierarchy if isinstance(h, dict)]
     intro_word_target = 150
